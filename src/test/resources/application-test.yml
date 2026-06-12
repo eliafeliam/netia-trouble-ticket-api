@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: trouble-ticket-api
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: false
+  datasource:
+    url: jdbc:postgresql://localhost:5432/trouble_ticket_test
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+jwt:
+  secret: test-secret-key-which-is-minimum-32-characters-long-for-hs256
+  expiration: 86400000
+
+logging:
+  level:
+    root: WARN
+    com.netia: DEBUG
+

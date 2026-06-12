@@ -1,0 +1,63 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trouble-ticket-db
+    environment:
+      POSTGRES_DB: trouble_ticket
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trouble-ticket-network
+
+  application:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trouble-ticket-api
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trouble_ticket
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: trouble_ticket
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: redis
+      JWT_SECRET: your-super-secret-key-that-should-be-changed-in-production-at-least-32-chars
+      SERVER_PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - trouble-ticket-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: trouble-ticket-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - trouble-ticket-network
+
+volumes:
+  postgres_data:
+
+networks:
+  trouble-ticket-network:
+    driver: bridge
+
+

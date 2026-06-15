@@ -110,10 +110,12 @@
         </dependency>
 
         <!-- Rate limiting (Bucket4j) -->
+        <!-- Source: https://mvnrepository.com/artifact/com.bucket4j/bucket4j-core -->
         <dependency>
-            <groupId>com.github.bucket4j</groupId>
+            <groupId>com.bucket4j</groupId>
             <artifactId>bucket4j-core</artifactId>
             <version>8.1.0</version>
+            <scope>compile</scope>
         </dependency>
 
         <!-- Redis for idempotency and distributed features -->
@@ -127,6 +129,16 @@
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
+        </dependency>
+
+        <!-- Logstash Logback Encoder — JSON structured logging for Fluentd/Logstash/Kibana.
+             WHY: Plain text logs require fragile regex parsing in log aggregators.
+             JSON appender emits one JSON object per line with all MDC fields (requestId,
+             tenantId) as top-level keys — Logstash indexes them without any grok filter. -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>7.4</version>
         </dependency>
 
         <!-- Testing -->

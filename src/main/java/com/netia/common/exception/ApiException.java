@@ -9,7 +9,10 @@ public class ApiException extends RuntimeException {
     private final String requestId;
 
     public ApiException(String errorCode, String message) {
-        this(errorCode, message, null);
+        // WHY explicit cast to String: without it the compiler sees both
+        // ApiException(String,String,String) and ApiException(String,String,Throwable)
+        // as equally valid matches for null — ambiguous call — and refuses to compile.
+        this(errorCode, message, (String) null);
     }
 
     public ApiException(String errorCode, String message, String requestId) {

@@ -2,7 +2,12 @@ package com.netia.common.security;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
@@ -11,13 +16,30 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
-import jakarta.servlet.FilterChain;
-import jakarta.servlet.ServletException;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.List;
 
+/**
+ * Extracts and validates Bearer JWT from each request, populating the SecurityContext.
+ *
+ * WHY OncePerRequestFilter:
+ *   Guarantees exactly one execution per request even in async dispatch chains
+ *   (e.g. error forwarding). A plain Filter could run twice on the same request.
+ *
+ * WHY we store tenantId both in SecurityContext and as a request attribute:
+ *   SecurityContext (TenantAwarePrincipal) — used by service layer and RLS inspector.
+ *   request.setAttribute("tenantId") — used by RateLimitFilter, which runs AFTER this
+ *   filter and reads tenantId without touching the SecurityContext.
+ *   MDC — used by Logback pattern so every log line emitted during this request
+ *   automatically carries [tenantId], enabling per-tenant log filtering in Kibana/Loki.
+ *
+ * WHY we don't return 401 here on invalid token:
+ *   Filters that set the response directly bypass Spring MVC error handling — the
+ *   GlobalExceptionHandler is never called, so the error format is inconsistent.
+ *   Instead we let the request continue unauthenticated; Spring Security's
+ *   AuthenticationEntryPoint (configured in SecurityConfiguration) will produce the
+ *   correct 401 JSON response via GlobalExceptionHandler.
+ */
 @Slf4j
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
@@ -32,56 +54,43 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     }
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
-            throws ServletException, IOException {
-
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+                                    FilterChain filterChain) throws ServletException, IOException {
         try {
             String token = extractToken(request);
-
             if (token != null && jwtTokenProvider.isTokenValid(token)) {
                 Claims claims = jwtTokenProvider.extractClaims(token);
-                String userId = claims.getSubject();
+                String userId   = claims.getSubject();
                 String tenantId = claims.get("tenantId", String.class);
 
                 List<GrantedAuthority> authorities = List.of(
                         new SimpleGrantedAuthority("ROLE_USER"),
+                        // TENANT: authority lets future @PreAuthorize rules check tenant membership.
                         new SimpleGrantedAuthority("TENANT:" + tenantId)
                 );
 
-                Authentication authentication = new UsernamePasswordAuthenticationToken(
-                        new TenantAwarePrincipal(userId, tenantId),
-                        token,
-                        authorities
-                );
+                Authentication auth = new UsernamePasswordAuthenticationToken(
+                        new TenantAwarePrincipal(userId, tenantId), token, authorities);
 
-                SecurityContextHolder.getContext().setAuthentication(authentication);
+                SecurityContextHolder.getContext().setAuthentication(auth);
                 request.setAttribute("tenantId", tenantId);
-                // also put tenantId into MDC for logging; RequestIdFilter will clear MDC at the end
-                try {
-                    org.slf4j.MDC.put("tenantId", tenantId);
-                } catch (Exception ignore) {
-                    // ignore if MDC not available
-                }
-                log.debug("Authentication set for user: {} in tenant: {}", userId, tenantId);
+                MDC.put("tenantId", tenantId);  // cleared by RequestIdFilter in finally block
+                log.debug("Authenticated user={} tenant={}", userId, tenantId);
             } else if (token != null) {
-                log.warn("Invalid or expired token");
+                log.warn("Invalid or expired JWT token");
             }
         } catch (JwtException e) {
-            log.warn("Could not set user authentication in security context", e);
+            // Log and continue — Spring Security's 401 handler takes over for protected endpoints.
+            log.warn("JWT processing failed: {}", e.getMessage());
         }
 
         filterChain.doFilter(request, response);
     }
 
     private String extractToken(HttpServletRequest request) {
-        String authorization = request.getHeader(AUTHORIZATION_HEADER);
-
-        if (authorization != null && authorization.startsWith(BEARER_PREFIX)) {
-            return authorization.substring(BEARER_PREFIX.length());
-        }
-
-        return null;
+        String header = request.getHeader(AUTHORIZATION_HEADER);
+        return (header != null && header.startsWith(BEARER_PREFIX))
+                ? header.substring(BEARER_PREFIX.length())
+                : null;
     }
 }
-
-

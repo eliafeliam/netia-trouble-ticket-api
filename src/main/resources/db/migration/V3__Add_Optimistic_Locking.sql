@@ -1,0 +1,19 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Add optimistic locking version column to trouble_ticket.
+--
+-- WHY this migration exists:
+--   The TroubleTicket entity has @Version Long version which Hibernate uses for
+--   Optimistic Locking. If two concurrent PATCH requests try to close the same
+--   ticket, Hibernate detects the conflict at commit time via this column and
+--   throws ObjectOptimisticLockingFailureException (mapped to HTTP 409 Conflict)
+--   instead of silently overwriting one update with another (last-write-wins).
+--
+-- WHY DEFAULT 0:
+--   Existing rows get version=0 as their initial value. Hibernate increments it
+--   on every UPDATE. New rows are also inserted with version=0.
+--
+-- WHY NOT NULL:
+--   Hibernate requires the version column to always have a value — a NULL version
+--   would cause an OptimisticLockException on the very first update of any row.
+-- ─────────────────────────────────────────────────────────────────────────────
+ALTER TABLE trouble_ticket ADD COLUMN version BIGINT NOT NULL DEFAULT 0;

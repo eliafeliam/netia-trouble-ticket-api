@@ -1,7 +1,13 @@
-version: '3.9'
+# WHY Docker Compose for local dev:
+#   * Gives every developer an identical, reproducible environment in one command.
+#   * Mirrors the production topology (app + Postgres + Redis) without Kubernetes overhead.
+#   * NOTE: credentials here are for local dev only. Production secrets must come from
+#     a secrets manager (Vault / AWS Secrets Manager) or Kubernetes Secrets — never hardcoded.
 
 services:
   postgres:
+    # WHY postgres:16-alpine: same major version as production target; Alpine variant
+    # keeps the image small and reduces CVE surface.
     image: postgres:16-alpine
     container_name: trouble-ticket-db
     environment:
@@ -13,7 +19,26 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
+      # WHY pg_isready: lightweight built-in probe that checks whether Postgres is
+      # accepting connections, without opening a full DB session.
       test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trouble-ticket-network
+
+  redis:
+    # WHY redis:7-alpine: Redis 7 introduced significant performance improvements
+    # and ACL v2. Alpine keeps the image minimal.
+    image: redis:7-alpine
+    container_name: trouble-ticket-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      # WHY redis-cli ping: the canonical liveness check for Redis; returns PONG if
+      # the server is ready to accept commands.
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,38 +51,37 @@ services:
       dockerfile: Dockerfile
     container_name: trouble-ticket-api
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/trouble_ticket
-      SPRING_DATASOURCE_USERNAME: postgres
-      SPRING_DATASOURCE_PASSWORD: postgres
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: trouble_ticket
       DB_USER: postgres
       DB_PASSWORD: postgres
       REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # WHY JWT_SECRET via env var: secrets must never be baked into the image or
+      # committed to Git. In prod, inject from a secrets manager. The value below
+      # is for local dev only — change it before any deployment.
       JWT_SECRET: your-super-secret-key-that-should-be-changed-in-production-at-least-32-chars
       SERVER_PORT: 8080
     ports:
       - "8080:8080"
     depends_on:
+      # WHY condition: service_healthy for both Postgres and Redis:
+      # Without this the app container starts immediately and crashes because the DB
+      # and Redis ports are not yet accepting connections. health-condition ensures
+      # the app only starts once both dependencies are fully ready.
       postgres:
         condition: service_healthy
-    networks:
-      - trouble-ticket-network
-
-  redis:
-    image: redis:7-alpine
-    container_name: trouble-ticket-redis
-    ports:
-      - "6379:6379"
+      redis:
+        condition: service_healthy
     networks:
       - trouble-ticket-network
 
 volumes:
   postgres_data:
+    # Named volume survives container restarts, so dev data persists between docker-compose
+    # up/down cycles. Use 'docker-compose down -v' to wipe it.
 
 networks:
   trouble-ticket-network:
     driver: bridge
-
-

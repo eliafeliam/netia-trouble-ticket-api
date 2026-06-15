@@ -5,6 +5,7 @@ import com.netia.common.util.RequestIdHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -14,118 +15,98 @@ import org.springframework.web.context.request.WebRequest;
 
 import java.util.stream.Collectors;
 
+/**
+ * Centralised exception → HTTP response mapping.
+ *
+ * WHY @RestControllerAdvice (not per-controller @ExceptionHandler):
+ *   A single global handler guarantees consistent error response format across all
+ *   endpoints. Per-controller handlers would require duplication and risk divergence.
+ *
+ * WHY the errorResponse() helper method:
+ *   Every handler builds the same ErrorResponse structure. The helper eliminates
+ *   that duplication (DRY) and keeps each handler to a single readable line.
+ *
+ * Handler order matters — Spring picks the most specific matching type first,
+ * so the generic Exception handler at the bottom only fires when nothing else matches.
+ */
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(AuthenticationException.class)
-    public ResponseEntity<ErrorResponse> handleAuthenticationException(
-            AuthenticationException ex,
-            WebRequest request) {
+    public ResponseEntity<ErrorResponse> handleAuthentication(AuthenticationException ex) {
         log.warn("Authentication error: {}", ex.getMessage());
-
-        ErrorResponse response = ErrorResponse.builder()
-                .code("UNAUTHORIZED")
-                .message("Brak poprawnego Bearer tokenu.")
-                .requestId(RequestIdHolder.getRequestId())
-                .build();
-
-        return new ResponseEntity<>(response, HttpStatus.UNAUTHORIZED);
+        return error(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Brak poprawnego Bearer tokenu.");
     }
 
     @ExceptionHandler(AccessDeniedException.class)
-    public ResponseEntity<ErrorResponse> handleAccessDeniedException(
-            AccessDeniedException ex,
-            WebRequest request) {
+    public ResponseEntity<ErrorResponse> handleAccessDenied(AccessDeniedException ex) {
         log.warn("Access denied: {}", ex.getMessage());
-
-        ErrorResponse response = ErrorResponse.builder()
-                .code("FORBIDDEN")
-                .message("Użytkownik nie ma uprawnień do wykonania tej operacji.")
-                .requestId(RequestIdHolder.getRequestId())
-                .build();
-
-        return new ResponseEntity<>(response, HttpStatus.FORBIDDEN);
+        return error(HttpStatus.FORBIDDEN, "FORBIDDEN", "Użytkownik nie ma uprawnień do wykonania tej operacji.");
     }
 
     @ExceptionHandler(ResourceNotFoundException.class)
-    public ResponseEntity<ErrorResponse> handleResourceNotFoundException(
-            ResourceNotFoundException ex,
-            WebRequest request) {
-        log.warn("Resource not found: {} - {}", ex.getErrorCode(), ex.getMessage());
-
-        ErrorResponse response = ErrorResponse.builder()
-                .code(ex.getErrorCode())
-                .message(ex.getMessage())
-                .requestId(RequestIdHolder.getRequestId())
-                .build();
-
-        return new ResponseEntity<>(response, HttpStatus.NOT_FOUND);
+    public ResponseEntity<ErrorResponse> handleNotFound(ResourceNotFoundException ex) {
+        log.warn("Resource not found: {} — {}", ex.getErrorCode(), ex.getMessage());
+        return error(HttpStatus.NOT_FOUND, ex.getErrorCode(), ex.getMessage());
     }
 
     @ExceptionHandler(ValidationException.class)
-    public ResponseEntity<ErrorResponse> handleValidationException(
-            ValidationException ex,
-            WebRequest request) {
+    public ResponseEntity<ErrorResponse> handleValidation(ValidationException ex) {
         log.warn("Validation error: {}", ex.getMessage());
-
-        ErrorResponse response = ErrorResponse.builder()
-                .code("VALIDATION_ERROR")
-                .message(ex.getMessage())
-                .requestId(RequestIdHolder.getRequestId())
-                .build();
-
-        return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+        return error(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", ex.getMessage());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<ErrorResponse> handleMethodArgumentNotValidException(
-            MethodArgumentNotValidException ex,
-            WebRequest request) {
-
+    public ResponseEntity<ErrorResponse> handleBeanValidation(MethodArgumentNotValidException ex) {
+        // WHY stream().map().collect(): collects all field errors into one readable message
+        // rather than surfacing only the first violation.
         String message = ex.getBindingResult().getFieldErrors().stream()
                 .map(e -> e.getField() + ": " + e.getDefaultMessage())
                 .collect(Collectors.joining(", "));
-
-        log.warn("Validation error: {}", message);
-
-        ErrorResponse response = ErrorResponse.builder()
-                .code("VALIDATION_ERROR")
-                .message(message)
-                .requestId(RequestIdHolder.getRequestId())
-                .build();
-
-        return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+        log.warn("Bean validation error: {}", message);
+        return error(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", message);
     }
 
     @ExceptionHandler(ApiException.class)
-    public ResponseEntity<ErrorResponse> handleApiException(
-            ApiException ex,
-            WebRequest request) {
-        log.warn("API error: {} - {}", ex.getErrorCode(), ex.getMessage());
+    public ResponseEntity<ErrorResponse> handleApiException(ApiException ex) {
+        log.warn("API error: {} — {}", ex.getErrorCode(), ex.getMessage());
+        return error(HttpStatus.BAD_REQUEST, ex.getErrorCode(), ex.getMessage());
+    }
 
-        ErrorResponse response = ErrorResponse.builder()
-                .code(ex.getErrorCode())
-                .message(ex.getMessage())
-                .requestId(RequestIdHolder.getRequestId())
-                .build();
-
-        return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+    /**
+     * WHY 409 Conflict for optimistic locking (not 500):
+     *   @Version on TroubleTicket triggers this when two concurrent PATCH requests race.
+     *   409 is semantically correct: the request itself was valid but conflicts with the
+     *   current resource state. The client should retry after a fresh GET.
+     */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ErrorResponse> handleOptimisticLocking(ObjectOptimisticLockingFailureException ex) {
+        log.warn("Optimistic locking conflict: {}", ex.getMessage());
+        return error(HttpStatus.CONFLICT, "CONFLICT",
+                "Zasób został zmodyfikowany przez inny proces. Pobierz aktualny stan i spróbuj ponownie.");
     }
 
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<ErrorResponse> handleGenericException(
-            Exception ex,
-            WebRequest request) {
+    public ResponseEntity<ErrorResponse> handleGeneric(Exception ex) {
         log.error("Unexpected error", ex);
+        return error(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Wewnętrzny błąd serwera.");
+    }
 
-        ErrorResponse response = ErrorResponse.builder()
-                .code("INTERNAL_ERROR")
-                .message("Wewnętrzny błąd serwera.")
-                .requestId(RequestIdHolder.getRequestId())
-                .build();
+    // ── Helper ────────────────────────────────────────────────────────────────
 
-        return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
+    /**
+     * WHY a private helper instead of inlining ErrorResponse.builder() in each handler:
+     *   DRY — the builder chain is identical in every handler. The helper also ensures
+     *   requestId is always included without each handler remembering to add it.
+     */
+    private ResponseEntity<ErrorResponse> error(HttpStatus status, String code, String message) {
+        return ResponseEntity.status(status).body(
+                ErrorResponse.builder()
+                        .code(code)
+                        .message(message)
+                        .requestId(RequestIdHolder.getRequestId())
+                        .build()
+        );
     }
 }
-

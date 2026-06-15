@@ -1,8 +1,22 @@
 spring:
   application:
     name: trouble-ticket-api
+
+  # ── Java 21 Virtual Threads ───────────────────────────────────────────────────
+  # WHAT: Enables Project Loom's Virtual Threads for all blocking I/O operations.
+  # WHY: Virtual threads are lightweight (millions can exist concurrently) and don't
+  #      block OS threads during I/O waits (DB queries, Redis calls). This allows the
+  #      app to handle 10,000+ concurrent requests with minimal memory overhead compared
+  #      to traditional platform threads. Critical for Tier-1 workloads where blocking
+  #      operations (JDBC, Redis) dominate the request lifecycle.
+  threads:
+    virtual:
+      enabled: true
+
   jpa:
     hibernate:
+      # 'validate' (never 'update'/'create' in prod): schema is owned by Flyway, Hibernate only
+      # checks that the entities match the migrated schema. Catches drift between code and DB.
       ddl-auto: validate
     properties:
       hibernate:
@@ -11,35 +25,67 @@ spring:
         use_sql_comments: true
         session_events:
           log: false
-        # Note: StatementInspector registration happens via Spring bean discovery
-        # TenantStatementInspector will be automatically registered by Hibernate
-        # when it's a @Component and implements StatementInspector interface.
+        # TenantStatementInspector is registered automatically: it is a @Component implementing
+        # Hibernate's StatementInspector, so it prepends "SET LOCAL app.current_tenant = ..."
+        # to every statement, which drives the Row Level Security policies (see V2 migration).
+
   datasource:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:trouble_ticket}
+    # WHY DB_USER defaults to 'postgres' locally but 'ticket_app_user' in production:
+    #   In prod the app pod connects as ticket_app_user (DML only — no DDL).
+    #   Migrations run separately as a K8s Job using the postgres/migration user.
+    #   See V4__Least_Privilege_Roles.sql for the role definition.
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
     hikari:
+      # ── Connection pool sizing ────────────────────────────────────────────────
+      # maximum-pool-size is the hard cap on concurrent DB connections this single
+      # replica can hold. Bigger is NOT faster: each Postgres connection is a real
+      # OS process, and past a point the DB spends its CPU on context-switching
+      # instead of useful work. Rule of thumb per replica: ((cores * 2) + spindles),
+      # which lands around 10–20 for a typical pod.
       maximum-pool-size: 10
-      minimum-idle: 2
-      connection-timeout: 20000
+      # minimum-idle == maximum-pool-size => FIXED pool. We pre-warm all 10 connections
+      # at startup so a sudden burst of traffic never pays the latency spike of opening
+      # connections "on the fly". Recommended for Tier-1 / Enterprise workloads.
+      minimum-idle: 10
+      # Fail fast under overload: if every connection is busy, a waiting request gets a
+      # clear error after 3s instead of hanging ~20s. Lets upstream (LB / circuit breaker)
+      # react quickly rather than piling up requests.
+      connection-timeout: 3000
+      # With a fixed pool idle-timeout is effectively a no-op, but we keep it explicit.
       idle-timeout: 300000
+      # Recycle each connection after 20 min — must be STRICTLY LESS than Postgres'
+      # idle/TCP timeouts so we never reuse a "zombie" socket the server already closed.
       max-lifetime: 1200000
+      # ── Capacity planning across the cluster ─────────────────────────────────
+      # Postgres has a global max_connections (default 100; ~95 usable after admin +
+      # monitoring reservations). The cluster-wide invariant we must respect is:
+      #     (number of app replicas) * maximum-pool-size  <  max_connections
+      # e.g. 9 pods * 10 = 90 < 95. If the HPA scales beyond that we would hit
+      # "FATAL: sorry, too many clients already" and cascade-fail — so at high replica
+      # counts we'd put PgBouncer in front of Postgres to multiplex a small real pool.
 
-  redis:
-    host: ${REDIS_HOST:localhost}
-    port: ${REDIS_PORT:6379}
-
-spring:
-  redis:
-    host: ${REDIS_HOST:localhost}
-    port: ${REDIS_PORT:6379}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
 
   flyway:
-    baselineOnMigrate: true
+    # FLYWAY_ENABLED lets us turn schema migration OFF in the application pods and run it
+    # as a dedicated step instead (CI stage / K8s Job / initContainer — see k8s/ manifests).
+    # Why a separate step rather than every pod migrating on boot:
+    #   * Determinism: migration runs exactly once, in one process — no Flyway lock contention
+    #     where N booting pods serialise behind each other and slow the rollout.
+    #   * Safety: a heavy migration (e.g. index on a huge table) can outlast the readiness
+    #     probe; a pod would be killed mid-migration, leaving the schema-history table locked.
+    #   * Least privilege: the migration step can use a DDL-capable role, while the running
+    #     app uses a restricted role with only DML rights.
+    # Default stays 'true' so local dev / docker-compose just works.
+    enabled: ${FLYWAY_ENABLED:true}
+    baseline-on-migrate: true
     locations: classpath:db/migration
-
-  # Security user credentials should NOT be stored here. Use external auth or environment variables.
 
 server:
   port: ${SERVER_PORT:8080}
@@ -48,24 +94,56 @@ server:
   error:
     include-message: always
     include-binding-errors: always
+  # Graceful shutdown: on SIGTERM (rolling deploy / scale-down) Spring stops accepting new
+  # requests but lets in-flight ones finish, so Kubernetes never severs an active connection.
+  shutdown: graceful
 
 jwt:
-  # JWT secret MUST be provided via environment variable in production
+  # JWT secret MUST be provided via environment variable — no default, so the app refuses to
+  # start without it rather than booting with a guessable key.
+  # NOTE: this HS256 (symmetric) provider is for local/dev/testing only. In production the
+  # token issuing/verification moves to Keycloak (OIDC) — see SecurityConfiguration for the
+  # resource-server config that replaces this.
   secret: ${JWT_SECRET}
   expiration: ${JWT_EXPIRATION:86400000}
 
+# Rate limiting (Redis-backed, shared across all replicas) — see RateLimitFilter.
+rate-limit:
+  requests-per-minute: ${RATE_LIMIT_RPM:100}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # prometheus exposed so the Prometheus server can scrape /actuator/prometheus (PULL model).
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+      # Split liveness vs readiness so Kubernetes probes mean different things:
+      probes:
+        enabled: true
+      group:
+        # liveness = "is the JVM alive?" — failing it RESTARTS the pod.
+        liveness:
+          include: livenessState
+        # readiness = "can this pod serve traffic right now?" — failing it pulls the pod out of
+        # the load balancer (no restart). We add db + redis so a pod that lost its datastore
+        # connections stops receiving traffic instead of returning errors to clients.
+        readiness:
+          include: readinessState,db,redis
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
 logging:
-  level:
-    root: INFO
-    com.netia: DEBUG
-    org.springframework.security: DEBUG
-    org.springframework.web: INFO
-    org.hibernate.SQL: DEBUG
-    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
-  pattern:
-    # Include requestId and tenantId from MDC for easy correlation in logs
-    console: "%d{yyyy-MM-dd HH:mm:ss} [%X{requestId:-no-req}] [%X{tenantId:-no-tenant}] - %logger{36} - %msg%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] [%X{requestId:-no-req}] [%X{tenantId:-no-tenant}] %-5level %logger{36} - %msg%n"
+  # Logging levels and format are configured in logback-spring.xml.
+  # WHY logback-spring.xml instead of application.yml properties:
+  #   logback-spring.xml supports <springProfile> blocks that switch between
+  #   human-readable text (dev) and structured JSON (prod) in one file.
+  #   application.yml logging.pattern.* cannot conditionally switch encoders.
   file:
     name: logs/application.log
     max-size: 10MB
@@ -77,9 +155,3 @@ springdoc:
     enabled: true
   api-docs:
     path: /v3/api-docs
-
-
-
-
-
-

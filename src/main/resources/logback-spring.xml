@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logback configuration with dual-appender strategy:
+
+  WHY two separate appenders (CONSOLE_TEXT + CONSOLE_JSON):
+    * Local development (default profile): CONSOLE_TEXT writes human-readable coloured
+      output — easy to read in the IDE/terminal without parsing JSON.
+    * Production (prod profile): CONSOLE_JSON writes structured JSON to stdout so that
+      Fluentd/Fluent Bit (running as a DaemonSet in Kubernetes) can forward each line
+      as a parsed JSON document to Elasticsearch without any grok regex.
+
+  WHY stdout only (no file appender in prod):
+    Kubernetes best practice is to write logs to stdout and let the log aggregation
+    infrastructure collect them from the container runtime. File-based logging inside
+    a container requires volume mounts and log rotation — unnecessary complexity.
+    The file appender in application.yml is for local dev convenience only.
+
+  WHY MDC fields (requestId, tenantId) appear in every line:
+    These fields are set by RequestIdFilter and JwtAuthenticationFilter for every request.
+    Including them in every log line means a single Kibana/Loki query on requestId
+    reconstructs the complete trace of one HTTP request across all log lines.
+-->
+<configuration>
+
+    <!-- ── Local / dev profile: human-readable coloured text ──────────────────── -->
+    <springProfile name="!prod">
+        <appender name="CONSOLE_TEXT" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%d{HH:mm:ss.SSS} %highlight(%-5level) [%X{requestId:-no-req}] [%X{tenantId:-no-tenant}] %cyan(%logger{36}) - %msg%n</pattern>
+            </encoder>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_TEXT"/>
+        </root>
+
+        <logger name="com.netia" level="DEBUG"/>
+        <logger name="org.hibernate.SQL" level="DEBUG"/>
+    </springProfile>
+
+    <!-- ── Production profile: structured JSON for Fluentd → Elasticsearch ──── -->
+    <!--
+      WHY LogstashEncoder (not LoggingEventCompositeJsonEncoder):
+        LogstashEncoder is the opinionated high-level encoder from logstash-logback-encoder.
+        It automatically includes: timestamp, level, logger, thread, message, stack_trace,
+        and ALL MDC entries as top-level JSON fields. Zero configuration required.
+        LoggingEventCompositeJsonEncoder is the lower-level alternative when you need
+        custom field names or exclusions.
+    -->
+    <springProfile name="prod">
+        <appender name="CONSOLE_JSON" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <!-- Rename default "message" field to "msg" to match Netia log schema. -->
+                <fieldNames>
+                    <message>msg</message>
+                    <levelValue>[ignore]</levelValue>
+                </fieldNames>
+                <!-- Include MDC fields (requestId, tenantId) as top-level JSON keys. -->
+                <includeMdcKeyName>requestId</includeMdcKeyName>
+                <includeMdcKeyName>tenantId</includeMdcKeyName>
+            </encoder>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_JSON"/>
+        </root>
+
+        <!-- Suppress noisy framework loggers in prod — keep only WARN and above. -->
+        <logger name="org.springframework.security" level="WARN"/>
+        <logger name="org.hibernate.SQL" level="WARN"/>
+        <logger name="com.netia" level="INFO"/>
+    </springProfile>
+
+</configuration>

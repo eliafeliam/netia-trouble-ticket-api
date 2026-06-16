@@ -1,12 +1,17 @@
 package com.netia.common.security;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.netia.common.dto.ErrorResponse;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
@@ -48,27 +53,41 @@ public class SecurityConfiguration {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
+    private final ObjectMapper objectMapper;
+
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-                // CSRF not needed for stateless Bearer-token APIs — see class javadoc.
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .exceptionHandling(ex -> ex.authenticationEntryPoint(unauthorizedEntryPoint()))
                 .authorizeHttpRequests(authz -> authz
-                        // Public: Swagger UI, OpenAPI spec, Actuator probes, token endpoint.
                         .requestMatchers(
                                 "/swagger-ui.html", "/swagger-ui/**",
                                 "/v3/api-docs",     "/v3/api-docs/**",
                                 "/actuator/**",
-                                "/auth/**"
+                                // /auth/** — dev-only token endpoint (AuthController is @Profile("!prod")).
+                                // In prod this path returns 404 because the controller bean does not exist.
+                                // Keeping it in permitAll is harmless and avoids profile-conditional security config.
+                                "/auth/**",
+                                "/health"
                         ).permitAll()
-                        // Everything else requires a valid Bearer token.
                         .anyRequest().authenticated()
                 )
-                // Place JWT filter before Spring's UsernamePasswordAuthenticationFilter
-                // so SecurityContext is populated before any authorization decisions are made.
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
+    }
+
+    private AuthenticationEntryPoint unauthorizedEntryPoint() {
+        return (request, response, authException) -> {
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            ErrorResponse body = ErrorResponse.builder()
+                    .code("UNAUTHORIZED")
+                    .message("Brak poprawnego Bearer tokenu.")
+                    .build();
+            objectMapper.writeValue(response.getOutputStream(), body);
+        };
     }
 }

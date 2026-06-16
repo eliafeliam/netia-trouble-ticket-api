@@ -99,11 +99,17 @@ server:
   shutdown: graceful
 
 jwt:
-  # JWT secret MUST be provided via environment variable — no default, so the app refuses to
-  # start without it rather than booting with a guessable key.
-  # NOTE: this HS256 (symmetric) provider is for local/dev/testing only. In production the
-  # token issuing/verification moves to Keycloak (OIDC) — see SecurityConfiguration for the
-  # resource-server config that replaces this.
+  # ── LOCAL/DEV ONLY — replaced by Keycloak OIDC in production ──────────────────
+  # This HS256 secret is used by JwtTokenProvider to sign and verify tokens locally.
+  # In production:
+  #   1. AuthController is disabled (@Profile("!prod")) — no one can generate tokens here.
+  #   2. JwtTokenProvider is replaced by Spring Security OAuth2 Resource Server:
+  #        spring.security.oauth2.resourceserver.jwt.issuer-uri: https://keycloak.../realms/netia
+  #      which validates tokens using Keycloak's public JWKS endpoint (RS256, asymmetric).
+  #   3. This jwt.secret property becomes unused and can be removed from prod config.
+  #
+  # WHY no default value: app refuses to start without it — fail-fast is safer than
+  # running with a guessable key.
   secret: ${JWT_SECRET}
   expiration: ${JWT_EXPIRATION:86400000}
 

@@ -96,7 +96,7 @@ public class TroubleTicketService {
     @Transactional(readOnly = true)
     public List<TroubleTicketSummary> listTroubleTickets(String tenantId) {
         log.debug("Listing tickets for tenant={}", tenantId);
-        return repository.findByTenantIdPaged(tenantId, TroubleTicketRepository.top500ByCreatedAtDesc())
+        return repository.findByTenantIdPaged(tenantId, TroubleTicketRepository.top500())
                 .stream()
                 .map(mapper::toSummary)
                 .toList();

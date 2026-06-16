@@ -58,22 +58,19 @@ services:
       DB_PASSWORD: postgres
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      # WHY JWT_SECRET via env var: secrets must never be baked into the image or
-      # committed to Git. In prod, inject from a secrets manager. The value below
-      # is for local dev only — change it before any deployment.
       JWT_SECRET: your-super-secret-key-that-should-be-changed-in-production-at-least-32-chars
       SERVER_PORT: 8080
     ports:
       - "8080:8080"
     depends_on:
-      # WHY condition: service_healthy for both Postgres and Redis:
-      # Without this the app container starts immediately and crashes because the DB
-      # and Redis ports are not yet accepting connections. health-condition ensures
-      # the app only starts once both dependencies are fully ready.
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    links:
+      - postgres
+      - redis
+    restart: on-failure
     networks:
       - trouble-ticket-network
 

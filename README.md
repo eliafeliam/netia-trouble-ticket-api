@@ -416,15 +416,36 @@ Fluentd/Fluent Bit zbiera logi z kontenera bez żadnych reguł grok — gotowe d
 
 ## Uruchamianie testów
 
+### Unit testy (bez Docker)
+
 ```bash
-# Wymaga lokalnego Docker (Testcontainers uruchamia PostgreSQL w kontenerze)
 mvn test
 ```
 
-Testy obejmują:
-- **Unit testy** (`TroubleTicketServiceTest`) — logika biznesowa z Mockito, bez Spring kontekstu
-- **Testy integracyjne** (`TroubleTicketControllerIntegrationTest`) — pełny stack z prawdziwą bazą danych
-- **Testy RLS** (`RLSIntegrationTest`) — weryfikacja izolacji tenantów na poziomie PostgreSQL
+Domyślnie uruchamiane są wyłącznie unit testy (`TroubleTicketServiceTest`) — logika biznesowa z Mockito, bez Spring kontekstu, bez zależności od Docker.
+
+### Testy integracyjne (wymagają Docker)
+
+Testy integracyjne używają **Testcontainers** — automatycznie uruchamiają PostgreSQL w kontenerze Docker. Wymagania:
+
+- **Docker Desktop** musi być uruchomiony i odpowiadać na Docker API
+- Rancher Desktop: upewnij się, że w ustawieniach włączony jest tryb kompatybilności z Docker API (`dockerd` backend)
+
+```bash
+mvn test -DincludedGroups=integration
+```
+
+Testy integracyjne obejmują:
+- **TroubleTicketControllerIntegrationTest** — pełny stack z prawdziwą bazą danych (MockMvc + Testcontainers PostgreSQL)
+- **RLSIntegrationTest** — weryfikacja izolacji tenantów na poziomie PostgreSQL Row Level Security
+
+### Wszystkie testy naraz
+
+```bash
+mvn test -DincludedGroups=integration -Dsurefire.excludedGroups=
+```
+
+> **Uwaga:** Jeśli Docker nie jest dostępny, testy integracyjne zakończą się błędem `Could not find a valid Docker environment`. W takim przypadku używaj `mvn test` (tylko unit testy) lub przetestuj API ręcznie przez `docker-compose up --build` + curl (patrz sekcja [Weryfikacja działania](#weryfikacja-działania) lub plik `SZYBKI_TEST.md`).
 
 ---
 

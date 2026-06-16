@@ -16,7 +16,6 @@ spring:
   #   TroubleTicketControllerIntegrationTest uses @AutoConfigureTestDatabase(replace=NONE)
   #   + Testcontainers @ServiceConnection which injects the URL automatically.
   #   RLSIntegrationTest does the same via @DataJpaTest + @AutoConfigureTestDatabase(replace=NONE).
-
   flyway:
     enabled: true
     locations: classpath:db/migration

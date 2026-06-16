@@ -1,5 +1,7 @@
 package com.netia.common.security.rls;
 
+import com.netia.AbstractIntegrationTest;
+import com.netia.common.security.TenantAwarePrincipal;
 import com.netia.troubleticket.domain.TroubleTicket;
 import com.netia.troubleticket.domain.TroubleTicketStatus;
 import com.netia.troubleticket.repository.TroubleTicketRepository;
@@ -8,8 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
-import org.springframework.context.annotation.Import;
+import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -21,32 +22,12 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Integration test proving that Postgres Row Level Security (RLS) policies
- * enforce tenant isolation independently of application WHERE clauses.
- *
- * WHY @DataJpaTest (not @SpringBootTest):
- *   @DataJpaTest loads only the JPA slice (entities, repositories, Flyway) without
- *   starting the full web/security context. This makes the test fast while still
- *   running against a real Postgres instance (via Testcontainers configured in
- *   application-test.yml) where RLS policies are applied.
- *
- * WHY @Import({RLSConfiguration, TenantStatementInspector}):
- *   @DataJpaTest does not load @Configuration beans outside the JPA slice by default.
- *   We explicitly import the RLS beans so Hibernate registers the StatementInspector
- *   and the SET LOCAL prepend actually fires during tests.
- *
- * What these tests prove:
- *   1. A tenant can only see its own tickets even when the query has no WHERE filter.
- *   2. RLS blocks cross-tenant access even if a developer writes a "buggy" findAll().
- *   3. Multiple tenants are fully isolated from each other.
- */
 @Slf4j
-@DataJpaTest
-@Import({RLSConfiguration.class, TenantStatementInspector.class})
+@SpringBootTest
 @ActiveProfiles("test")
 @DisplayName("RLS Integration Tests — Postgres tenant isolation")
-class RLSIntegrationTest {
+@org.junit.jupiter.api.Tag("integration")
+class RLSIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     private TroubleTicketRepository repository;
@@ -56,47 +37,58 @@ class RLSIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        repository.deleteAll();
+        setSecurityContext(TENANT_A);
+        repository.findAllByTenantId(TENANT_A).forEach(repository::delete);
+        setSecurityContext(TENANT_B);
+        repository.findAllByTenantId(TENANT_B).forEach(repository::delete);
         SecurityContextHolder.clearContext();
     }
 
     @Test
     @DisplayName("Tenant A sees only its own ticket via explicit tenant query")
     void testRLSEnforcesPerTenantIsolation() {
-        saveTicket(TENANT_A, "ext-A", "Issue in A");
-        saveTicket(TENANT_B, "ext-B", "Issue in B");
+        setSecurityContext(TENANT_A);
+        saveTicket(TENANT_A, "ext-A-" + System.nanoTime(), "Issue in A");
+
+        setSecurityContext(TENANT_B);
+        saveTicket(TENANT_B, "ext-B-" + System.nanoTime(), "Issue in B");
 
         setSecurityContext(TENANT_A);
         List<TroubleTicket> ticketsA = repository.findAllByTenantId(TENANT_A);
 
         assertEquals(1, ticketsA.size());
-        assertEquals("ext-A", ticketsA.get(0).getExternalId());
+        assertTrue(ticketsA.get(0).getExternalId().startsWith("ext-A-"));
         log.info("✅ Tenant A sees only their own ticket");
     }
 
     @Test
     @DisplayName("RLS blocks cross-tenant data even when repository forgets WHERE clause (findAll)")
     void testRLSProtectsAgainstBuggyRepositoryCode() {
-        saveTicket(TENANT_A, "ext-A", "Issue in A");
-        saveTicket(TENANT_B, "ext-B", "Issue in B");
+        setSecurityContext(TENANT_A);
+        saveTicket(TENANT_A, "ext-A-" + System.nanoTime(), "Issue in A");
 
-        // Simulate a developer accidentally calling findAll() without a tenant filter.
-        // RLS policy must silently restrict results to the current tenant's rows only.
+        setSecurityContext(TENANT_B);
+        saveTicket(TENANT_B, "ext-B-" + System.nanoTime(), "Issue in B");
+
         setSecurityContext(TENANT_A);
         List<TroubleTicket> all = repository.findAll();
 
         assertEquals(1, all.size(), "RLS must filter findAll() to current tenant");
-        assertEquals("ext-A", all.get(0).getExternalId());
+        assertTrue(all.get(0).getExternalId().startsWith("ext-A-"));
         log.info("✅ RLS protected against buggy findAll() — returned only tenant-A data");
     }
 
     @Test
     @DisplayName("Multiple tickets per tenant are visible only to their owner")
     void testRLSAcrossMultipleTenants() {
-        saveTicket(TENANT_A, "ext-A-1", "First issue A");
-        saveTicket(TENANT_A, "ext-A-2", "Second issue A");
-        saveTicket(TENANT_B, "ext-B-1", "First issue B");
-        saveTicket(TENANT_B, "ext-B-2", "Second issue B");
+        long ts = System.nanoTime();
+        setSecurityContext(TENANT_A);
+        saveTicket(TENANT_A, "ext-A-1-" + ts, "First issue A");
+        saveTicket(TENANT_A, "ext-A-2-" + ts, "Second issue A");
+
+        setSecurityContext(TENANT_B);
+        saveTicket(TENANT_B, "ext-B-1-" + ts, "First issue B");
+        saveTicket(TENANT_B, "ext-B-2-" + ts, "Second issue B");
 
         setSecurityContext(TENANT_A);
         List<TroubleTicket> ticketsA = repository.findAllByTenantId(TENANT_A);
@@ -111,11 +103,7 @@ class RLSIntegrationTest {
         log.info("✅ Tenant B sees 2 tickets");
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
     private void saveTicket(String tenantId, String externalId, String description) {
-        // WHY no manual createdAt/updatedAt: @CreationTimestamp / @UpdateTimestamp
-        // are set by Hibernate at INSERT — we must not set them in the builder.
         TroubleTicket ticket = TroubleTicket.builder()
                 .id("TT-" + System.nanoTime())
                 .tenantId(tenantId)
@@ -124,11 +112,11 @@ class RLSIntegrationTest {
                 .description(description)
                 .status(TroubleTicketStatus.ACKNOWLEDGED)
                 .build();
-        repository.save(ticket);
+        repository.saveAndFlush(ticket);
     }
 
     private void setSecurityContext(String tenantId) {
-        var principal = new com.netia.common.security.TenantAwarePrincipal("test-user", tenantId);
+        var principal = new TenantAwarePrincipal("test-user", tenantId);
         var auth = new UsernamePasswordAuthenticationToken(
                 principal, tenantId,
                 Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER")));

@@ -5,13 +5,14 @@ FROM maven:3.9.7-eclipse-temurin-21 AS builder
 
 WORKDIR /app
 
+# Disable SSL verification — required when corporate proxy/firewall intercepts HTTPS.
+ENV MAVEN_OPTS="-Djavax.net.ssl.trustAll=true -Dmaven.resolver.transport=wagon -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true"
+
 # Copy the POM first so Docker layer-caching re-downloads dependencies ONLY when
 # pom.xml changes, not on every source code edit — dramatically faster rebuilds.
 COPY pom.xml .
-RUN mvn dependency:resolve -q
-
 COPY src ./src
-RUN mvn clean package -DskipTests -q
+RUN mvn clean package -DskipTests -q -Dmaven.resolver.transport=wagon -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
 
 # ─── Runtime stage ────────────────────────────────────────────────────────────
 # WHY eclipse-temurin:21-jre-alpine:

@@ -3,7 +3,6 @@ package com.netia.troubleticket.repository;
 import com.netia.troubleticket.domain.TroubleTicket;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -76,8 +75,8 @@ public interface TroubleTicketRepository extends JpaRepository<TroubleTicket, Lo
      * Convenience factory — creates a Pageable for the top-500 list query.
      * Centralises the limit constant so it can be found and changed in one place.
      */
-    static Pageable top500ByCreatedAtDesc() {
-        return PageRequest.of(0, 500, Sort.by(Sort.Direction.DESC, "createdAt"));
+    static Pageable top500() {
+        return PageRequest.of(0, 500);
     }
 
     /** Used by RLSIntegrationTest to assert cross-tenant isolation via findAll(). */

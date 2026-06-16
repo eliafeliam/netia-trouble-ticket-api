@@ -1,6 +1,7 @@
 package com.netia.common.idempotency;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -27,6 +28,7 @@ import java.util.Optional;
  *   any reasonable retry window while preventing unbounded Redis memory growth.
  *   After 24h the key expires automatically — no cleanup job required.
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class IdempotencyService {
@@ -40,37 +42,36 @@ public class IdempotencyService {
      * Value is either "IN_PROGRESS" (processing ongoing) or a ticketId (finished).
      */
     public Optional<String> get(String key) {
-        return Optional.ofNullable(redis.opsForValue().get(key));
+        try {
+            return Optional.ofNullable(redis.opsForValue().get(key));
+        } catch (Exception e) {
+            log.warn("Redis unavailable on get key={}: {}", key, e.getMessage());
+            return Optional.empty();
+        }
     }
 
-    /**
-     * Atomically claims the key for processing using SETNX (Set if Not eXists).
-     *
-     * WHY setIfAbsent (SETNX):
-     *   SETNX is atomic in Redis — only one caller gets true even under concurrent load.
-     *   This prevents two replicas from both believing they own the key and both proceeding
-     *   to create the ticket, defeating the purpose of idempotency.
-     *
-     * @return true if this caller claimed the key (may proceed), false if another replica already owns it.
-     */
     public boolean claim(String key) {
-        return Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, "IN_PROGRESS", TTL));
+        try {
+            return Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, "IN_PROGRESS", TTL));
+        } catch (Exception e) {
+            log.warn("Redis unavailable on claim key={}: {}", key, e.getMessage());
+            return true; // fail open: let the request proceed, DB constraint is the safety net
+        }
     }
 
-    /**
-     * Overwrites the key with the finished ticketId, replacing "IN_PROGRESS".
-     * Subsequent retries will find the ticketId and return it without re-processing.
-     */
     public void storeResult(String key, String ticketId) {
-        redis.opsForValue().set(key, ticketId, TTL);
+        try {
+            redis.opsForValue().set(key, ticketId, TTL);
+        } catch (Exception e) {
+            log.warn("Redis unavailable on storeResult key={}: {}", key, e.getMessage());
+        }
     }
 
-    /**
-     * Deletes the key. Called when processing fails so the next retry can re-claim it.
-     * Without this, a failed first attempt would leave the key as "IN_PROGRESS" forever
-     * (until TTL expiry), blocking all retries for 24h.
-     */
     public void remove(String key) {
-        redis.delete(key);
+        try {
+            redis.delete(key);
+        } catch (Exception e) {
+            log.warn("Redis unavailable on remove key={}: {}", key, e.getMessage());
+        }
     }
 }
